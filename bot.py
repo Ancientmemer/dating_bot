@@ -13,7 +13,7 @@ from pymongo import MongoClient
 
 # ================= CONFIG =================
 BOT_TOKEN = "5167240865:AAGUNjnYI_GjEES0dbcE2GL4GpHZikWSaI0"
-MONGO_URI = "mongodb://Ramanan:Ramanan@cluster0-shard-00-00.xxxxx.mongodb.net:27017,cluster0-shard-00-01.xxxxx.mongodb.net:27017,cluster0-shard-00-02.xxxxx.mongodb.net:27017/?ssl=true&replicaSet=atlas-xxxx-shard-0&authSource=admin&retryWrites=true&w=majority"
+MONGO_URI = "mongodb+srv://Ramanan:Ramanan@cluster0.sibj7v6.mongodb.net/?appName=Cluster0"
 OWNER_ID = 6936341505
 LOG_CHANNEL_ID = -1003500086789
 
