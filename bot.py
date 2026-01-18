@@ -1,9 +1,8 @@
 import re
-import uuid
 import logging
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton
+    ReplyKeyboardMarkup
 )
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -12,10 +11,13 @@ from telegram.ext import (
 from pymongo import MongoClient
 
 # ================= CONFIG =================
-BOT_TOKEN = "5167240865:AAGUNjnYI_GjEES0dbcE2GL4GpHZikWSaI0"
+BOT_TOKEN = "5167240865:AAEZfAYWp3_OpAvLO39mvtIg9NuJW9rlxy4"
 MONGO_URI = "mongodb+srv://Ramanan:Ramanan@cluster0.sibj7v6.mongodb.net/?appName=Cluster0"
 OWNER_ID = 6936341505
 LOG_CHANNEL_ID = -1003500086789
+
+MATCH_COST = 8
+REFERRAL_REWARD = 2
 
 # =========================================
 logging.basicConfig(level=logging.INFO)
@@ -25,9 +27,9 @@ db = client["datingbot"]
 users = db.users
 bans = db.bans
 
-waiting_queue = []
+random_queue, male_queue, female_queue = [], [], []
 
-# ================= UTILITIES =================
+# ================= UI =================
 
 def main_menu():
     return ReplyKeyboardMarkup(
@@ -49,29 +51,50 @@ def chat_menu():
         resize_keyboard=True
     )
 
-def clean_text(text):
-    return not re.search(r"(http|https|t\.me|@)", text.lower())
+def clean_text(t):
+    return not re.search(r"(http|https|t\.me|@)", t.lower())
+
+def remove_from_queues(uid):
+    for q in (random_queue, male_queue, female_queue):
+        if uid in q:
+            q.remove(uid)
 
 # ================= START =================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    uid = update.effective_user.id
 
-    if bans.find_one({"user_id": user_id}):
+    if bans.find_one({"user_id": uid}):
         return
 
-    if not users.find_one({"user_id": user_id}):
+    user = users.find_one({"user_id": uid})
+
+    if not user:
+        ref = None
+        if context.args and context.args[0].startswith("ref_"):
+            ref = int(context.args[0][4:])
+
         users.insert_one({
-            "user_id": user_id,
+            "user_id": uid,
             "coins": 0,
             "state": "COUNTRY",
             "blocked": [],
-            "ref_by": context.args[0][4:] if context.args and context.args[0].startswith("ref_") else None
+            "chat_with": None,
+            "ref_by": ref,
+            "ref_credited": False
         })
+
+        if ref and users.find_one({"user_id": ref}):
+            users.update_one(
+                {"user_id": ref},
+                {"$inc": {"coins": REFERRAL_REWARD}}
+            )
+
         await context.bot.send_message(
             LOG_CHANNEL_ID,
-            f"🆕 New user started bot\nUser ID: {user_id}"
+            f"🆕 New user started\nUser ID: {uid}"
         )
+
         await update.message.reply_text("🌍 Select your country:")
         await send_countries(update, context, 0)
     else:
@@ -79,51 +102,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= COUNTRY =================
 
-COUNTRIES = ["India", "USA", "UK", "Canada", "Australia", "Germany", "France",
-             "Italy", "Spain", "Brazil", "Mexico", "Japan", "China", "Korea"]
+COUNTRIES = ["India","USA","UK","Canada","Australia","Germany","France","Italy","Spain","Brazil","Mexico","Japan","China","Korea"]
 
 async def send_countries(update, context, page):
-    buttons = []
     per_page = 6
     start = page * per_page
-    for c in COUNTRIES[start:start+per_page]:
-        buttons.append([InlineKeyboardButton(c, callback_data=f"country_{c}")])
+    btns = [[InlineKeyboardButton(c, callback_data=f"country_{c}")]
+            for c in COUNTRIES[start:start+per_page]]
+
     nav = []
     if start > 0:
         nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"cpage_{page-1}"))
-    if start + per_page < len(COUNTRIES):
+    if start+per_page < len(COUNTRIES):
         nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"cpage_{page+1}"))
     if nav:
-        buttons.append(nav)
+        btns.append(nav)
 
-    await update.message.reply_text(
-        "Choose your country:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    await update.message.reply_text("Choose country:", reply_markup=InlineKeyboardMarkup(btns))
 
-async def country_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def country_handler(update, context):
+    q = update.callback_query
+    await q.answer()
 
-    if query.data.startswith("cpage_"):
-        await send_countries(query, context, int(query.data.split("_")[1]))
+    if q.data.startswith("cpage_"):
+        await send_countries(q, context, int(q.data.split("_")[1]))
         return
 
-    country = query.data.split("_", 1)[1]
     users.update_one(
-        {"user_id": query.from_user.id},
-        {"$set": {"country": country, "state": "NAME"}}
+        {"user_id": q.from_user.id},
+        {"$set": {"country": q.data.split("_")[1], "state": "NAME"}}
     )
-    await query.message.reply_text("✍️ Enter your name:")
+    await q.message.reply_text("✍️ Enter your name:")
 
-# ================= PROFILE STEPS =================
+# ================= PROFILE =================
 
-async def profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = users.find_one({"user_id": update.effective_user.id})
-    state = user.get("state")
+async def profile_handler(update, context):
+    u = users.find_one({"user_id": update.effective_user.id})
+    if not u:
+        return
 
-    if state == "NAME":
-        users.update_one({"user_id": user["user_id"]}, {"$set": {"name": update.message.text, "state": "GENDER"}})
+    if u["state"] == "NAME":
+        users.update_one({"user_id": u["user_id"]}, {"$set": {"name": update.message.text, "state": "GENDER"}})
         await update.message.reply_text(
             "Select gender:",
             reply_markup=InlineKeyboardMarkup([
@@ -132,97 +151,171 @@ async def profile_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
 
-    elif state == "ABOUT":
+    elif u["state"] == "ABOUT":
         if not clean_text(update.message.text):
-            await update.message.reply_text("❌ Links are not allowed.")
+            await update.message.reply_text("❌ Links not allowed.")
             return
-        users.update_one({"user_id": user["user_id"]}, {"$set": {"about": update.message.text, "state": "PHOTO"}})
-        await update.message.reply_text(
-            "Upload profile photo or skip:",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Skip", callback_data="skip_photo")]])
-        )
+        users.update_one({"user_id": u["user_id"]}, {"$set": {"about": update.message.text, "state": "DONE"}})
+        await update.message.reply_text("✅ Profile completed!", reply_markup=main_menu())
 
 async def gender_handler(update, context):
-    query = update.callback_query
-    await query.answer()
+    q = update.callback_query
+    await q.answer()
     users.update_one(
-        {"user_id": query.from_user.id},
-        {"$set": {"gender": query.data.split("_")[1], "state": "ABOUT"}}
+        {"user_id": q.from_user.id},
+        {"$set": {"gender": q.data.split("_")[1], "state": "ABOUT"}}
     )
-    await query.message.reply_text(
-        "Write about yourself or skip:",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Skip", callback_data="skip_about")]])
-    )
+    await q.message.reply_text("Write about yourself:")
 
-async def skip_about(update, context):
-    query = update.callback_query
-    await query.answer()
-    users.update_one({"user_id": query.from_user.id}, {"$set": {"state": "PHOTO"}})
-    await query.message.reply_text(
-        "Upload profile photo or skip:",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Skip", callback_data="skip_photo")]])
-    )
+# ================= MATCHING =================
 
-async def skip_photo(update, context):
-    query = update.callback_query
-    await query.answer()
-    users.update_one({"user_id": query.from_user.id}, {"$set": {"state": "DONE"}})
-    await query.message.reply_text("✅ Profile completed!", reply_markup=main_menu())
-
-# ================= CHAT =================
+async def try_match(queue, context):
+    if len(queue) < 2:
+        return
+    a, b = queue.pop(0), queue.pop(0)
+    users.update_one({"user_id": a}, {"$set": {"chat_with": b}})
+    users.update_one({"user_id": b}, {"$set": {"chat_with": a}})
+    await context.bot.send_message(a, "🎉 Connected!", reply_markup=chat_menu())
+    await context.bot.send_message(b, "🎉 Connected!", reply_markup=chat_menu())
 
 async def random_chat(update, context):
-    user_id = update.effective_user.id
-    if user_id in waiting_queue:
+    uid = update.effective_user.id
+    remove_from_queues(uid)
+    random_queue.append(uid)
+    await update.message.reply_text("🔍 Searching...", reply_markup=chat_menu())
+    await try_match(random_queue, context)
+
+async def find_male(update, context):
+    uid = update.effective_user.id
+    u = users.find_one({"user_id": uid})
+    if u["coins"] < MATCH_COST:
+        await update.message.reply_text("❌ Not enough coins.")
         return
-    waiting_queue.append(user_id)
-    await update.message.reply_text("🔍 Searching for partner...", reply_markup=chat_menu())
-    await try_match(context)
+    users.update_one({"user_id": uid}, {"$inc": {"coins": -MATCH_COST}})
+    remove_from_queues(uid)
+    male_queue.append(uid)
+    await update.message.reply_text("🔍 Searching male...", reply_markup=chat_menu())
+    await try_match(male_queue, context)
 
-async def try_match(context):
-    if len(waiting_queue) >= 2:
-        u1 = waiting_queue.pop(0)
-        u2 = waiting_queue.pop(0)
-        users.update_one({"user_id": u1}, {"$set": {"chat_with": u2}})
-        users.update_one({"user_id": u2}, {"$set": {"chat_with": u1}})
-        await send_profile(context, u1, u2)
-        await send_profile(context, u2, u1)
+async def find_female(update, context):
+    uid = update.effective_user.id
+    u = users.find_one({"user_id": uid})
+    if u["coins"] < MATCH_COST:
+        await update.message.reply_text("❌ Not enough coins.")
+        return
+    users.update_one({"user_id": uid}, {"$inc": {"coins": -MATCH_COST}})
+    remove_from_queues(uid)
+    female_queue.append(uid)
+    await update.message.reply_text("🔍 Searching female...", reply_markup=chat_menu())
+    await try_match(female_queue, context)
 
-async def send_profile(context, sender, receiver):
-    u = users.find_one({"user_id": receiver})
-    text = f"👤 {u['name']}\n🌍 {u['country']}\n⚧ {u['gender']}"
-    if u.get("about"):
-        text += f"\n📝 {u['about']}"
-    if u.get("photo"):
-        await context.bot.send_photo(sender, u["photo"], caption=text)
-    else:
-        await context.bot.send_message(sender, text)
+# ================= CHAT CONTROLS =================
 
-# ================= MESSAGE RELAY =================
+async def stop_chat(update, context):
+    uid = update.effective_user.id
+    u = users.find_one({"user_id": uid})
+    partner = u.get("chat_with")
+    remove_from_queues(uid)
 
-async def relay(update, context):
-    user = users.find_one({"user_id": update.effective_user.id})
-    partner = user.get("chat_with")
     if partner:
-        await context.bot.send_message(partner, update.message.text)
+        users.update_one({"user_id": partner}, {"$set": {"chat_with": None}})
+        await context.bot.send_message(partner, "❌ Chat ended.", reply_markup=main_menu())
+
+    users.update_one({"user_id": uid}, {"$set": {"chat_with": None}})
+    await update.message.reply_text("❌ Chat stopped.", reply_markup=main_menu())
+
+async def next_chat(update, context):
+    await stop_chat(update, context)
+    await random_chat(update, context)
+
+async def block_report(update, context):
+    uid = update.effective_user.id
+    u = users.find_one({"user_id": uid})
+    partner = u.get("chat_with")
+    if partner:
+        users.update_one({"user_id": uid}, {"$addToSet": {"blocked": partner}})
+        await stop_chat(update, context)
+
+async def unblock_users(update, context):
+    u = users.find_one({"user_id": update.effective_user.id})
+    bl = u.get("blocked", [])
+    if not bl:
+        await update.message.reply_text("🚫 No blocked users.")
+        return
+
+    txt = "🚫 Blocked Users:\n"
+    for i, uid in enumerate(bl, 1):
+        name = users.find_one({"user_id": uid}).get("name", "User")
+        txt += f"{i}. {name}\n"
+    txt += "\nSend number to unblock."
+    users.update_one({"user_id": u["user_id"]}, {"$set": {"state": "UNBLOCK"}})
+    await update.message.reply_text(txt)
 
 # ================= ADMIN =================
 
-async def stats(update, context):
-    if update.effective_user.id == OWNER_ID:
-        await update.message.reply_text(f"Total users: {users.count_documents({})}")
+async def broadcast(update, context):
+    if update.effective_user.id != OWNER_ID:
+        return
+    msg = " ".join(context.args)
+    for u in users.find():
+        try:
+            await context.bot.send_message(u["user_id"], msg)
+        except:
+            pass
+
+async def ban(update, context):
+    if update.effective_user.id != OWNER_ID:
+        return
+    uid = int(context.args[0])
+    bans.insert_one({"user_id": uid})
+    await update.message.reply_text("User banned.")
+
+async def unban(update, context):
+    if update.effective_user.id != OWNER_ID:
+        return
+    uid = int(context.args[0])
+    bans.delete_one({"user_id": uid})
+    await update.message.reply_text("User unbanned.")
+
+# ================= RELAY =================
+
+async def relay(update, context):
+    u = users.find_one({"user_id": update.effective_user.id})
+
+    if u.get("state") == "UNBLOCK":
+        idx = int(update.message.text) - 1
+        blocked = u["blocked"]
+        if 0 <= idx < len(blocked):
+            blocked.pop(idx)
+            users.update_one({"user_id": u["user_id"]}, {"$set": {"blocked": blocked, "state": "DONE"}})
+            await update.message.reply_text("✅ User unblocked.", reply_markup=main_menu())
+        return
+
+    partner = u.get("chat_with")
+    if partner:
+        await context.bot.send_message(partner, update.message.text)
 
 # ================= MAIN =================
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("stats", stats))
+app.add_handler(CommandHandler("broadcast", broadcast))
+app.add_handler(CommandHandler("ban", ban))
+app.add_handler(CommandHandler("unban", unban))
 
 app.add_handler(CallbackQueryHandler(country_handler, pattern="^country_|^cpage_"))
 app.add_handler(CallbackQueryHandler(gender_handler, pattern="^gender_"))
-app.add_handler(CallbackQueryHandler(skip_about, pattern="^skip_about$"))
-app.add_handler(CallbackQueryHandler(skip_photo, pattern="^skip_photo$"))
+
+app.add_handler(MessageHandler(filters.Regex("^🔀 Random Chat$"), random_chat))
+app.add_handler(MessageHandler(filters.Regex("^👨🏻 Find Male$"), find_male))
+app.add_handler(MessageHandler(filters.Regex("^👧🏻 Find Female$"), find_female))
+app.add_handler(MessageHandler(filters.Regex("^📢 Refer & Earn$"), refer_earn := refer_earn if False else None))
+app.add_handler(MessageHandler(filters.Regex("^🪙 Coins$"), coins := coins if False else None))
+app.add_handler(MessageHandler(filters.Regex("^⏭️ Next$"), next_chat))
+app.add_handler(MessageHandler(filters.Regex("^❌ Stop Chat$"), stop_chat))
+app.add_handler(MessageHandler(filters.Regex("^🚫 Block & Report$"), block_report))
+app.add_handler(MessageHandler(filters.Regex("^🚫 Unblock Users$"), unblock_users))
 
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, profile_handler))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, relay))
